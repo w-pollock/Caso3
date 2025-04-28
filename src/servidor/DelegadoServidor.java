@@ -50,35 +50,28 @@ public class DelegadoServidor implements Runnable {
             entrada = new ObjectInputStream(cliente.getInputStream());
             salida = new ObjectOutputStream(cliente.getOutputStream());
 
-            // 1. Generar parámetros DH
             AlgorithmParameterGenerator paramGen = AlgorithmParameterGenerator.getInstance("DH");
             paramGen.init(1024);
             AlgorithmParameters params = paramGen.generateParameters();
             DHParameterSpec dhSpec = params.getParameterSpec(DHParameterSpec.class);
 
-            // 2. Crear par de llaves usando esos parámetros
             KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH");
             keyGen.initialize(dhSpec);
             KeyPair parLlaves = keyGen.generateKeyPair();
 
-            // 3. Inicializar KeyAgreement
             KeyAgreement acuerdo = KeyAgreement.getInstance("DH");
             acuerdo.init(parLlaves.getPrivate());
 
-            // 4. Enviar p y g al cliente
             salida.writeObject(dhSpec.getP());
             salida.writeObject(dhSpec.getG());
             salida.flush();
 
-            // 5. Enviar llave pública del servidor
             salida.writeObject(parLlaves.getPublic().getEncoded());
             salida.flush();
 
-            // 6. Recibir llave pública del cliente
             byte[] llavePublicaClienteBytes = (byte[]) entrada.readObject();
             PublicKey llavePublicaCliente = DiffieHellman.reconstruirLlavePublica(llavePublicaClienteBytes);
 
-            // 7. Generar secreto compartido
             byte[] secretoCompartido = DiffieHellman.crearSecretoCompartido(acuerdo, llavePublicaCliente);
 
             MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
@@ -92,7 +85,6 @@ public class DelegadoServidor implements Runnable {
             SecretKey llaveCifrado = Cifrado.crearLlaveAES(llaveCifradoBytes);
             SecretKey llaveHMAC = Cifrado.crearLlaveHMAC(llaveHMACBytes);
 
-            // 8. Continuar normal: enviar tabla, recibir solicitud
             enviarTablaServicios(llaveCifrado, llaveHMAC);
             recibirYResponderSolicitud(llaveCifrado, llaveHMAC);
 
