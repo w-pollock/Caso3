@@ -42,29 +42,23 @@ public class Cliente {
         salida = new ObjectOutputStream(socket.getOutputStream());
         entrada = new ObjectInputStream(socket.getInputStream());
 
-        // 1. Recibir p y g
         BigInteger p = (BigInteger) entrada.readObject();
         BigInteger g = (BigInteger) entrada.readObject();
         DHParameterSpec dhSpec = new DHParameterSpec(p, g);
 
-        // 2. Crear par de llaves usando p y g
         KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH");
         keyGen.initialize(dhSpec);
         KeyPair parLlaves = keyGen.generateKeyPair();
 
-        // 3. Inicializar KeyAgreement
         KeyAgreement acuerdo = KeyAgreement.getInstance("DH");
         acuerdo.init(parLlaves.getPrivate());
 
-        // 4. Recibir llave pública del servidor
         byte[] llavePublicaServidorBytes = (byte[]) entrada.readObject();
         PublicKey llavePublicaServidorDH = DiffieHellman.reconstruirLlavePublica(llavePublicaServidorBytes);
 
-        // 5. Enviar llave pública del cliente
         salida.writeObject(parLlaves.getPublic().getEncoded());
         salida.flush();
 
-        // 6. Generar secreto compartido
         byte[] secretoCompartido = DiffieHellman.crearSecretoCompartido(acuerdo, llavePublicaServidorDH);
 
         MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
