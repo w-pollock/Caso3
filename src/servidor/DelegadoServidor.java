@@ -1,6 +1,7 @@
 package src.servidor;
 
 import javax.crypto.SecretKey;
+import javax.crypto.spec.DHParameterSpec;
 import javax.crypto.spec.IvParameterSpec;
 
 import src.crypto.Cifrado;
@@ -8,28 +9,39 @@ import src.crypto.DiffieHellman;
 import src.crypto.MedidorTiempo;
 
 import java.io.*;
-import java.math.BigInteger;
 import java.net.Socket;
 import java.security.*;
+
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Map;
 import javax.crypto.KeyAgreement;
-import java.util.Base64;
+import javax.crypto.Cipher;
+import java.math.BigInteger;
+import java.security.AlgorithmParameterGenerator;
+import java.security.AlgorithmParameters;
+import java.security.MessageDigest;
 
 public class DelegadoServidor implements Runnable {
 
     private Socket cliente;
     private PrivateKey llavePrivada;
+    private PublicKey llavePublicaServidor; // NUEVO
     private ObjectInputStream entrada;
     private ObjectOutputStream salida;
     private MedidorTiempo medidorFirmar = new MedidorTiempo();
     private MedidorTiempo medidorCifrar = new MedidorTiempo();
     private MedidorTiempo medidorVerificar = new MedidorTiempo();
 
-
-    public DelegadoServidor(Socket cliente, PrivateKey llavePrivada) {
+    public DelegadoServidor(Socket cliente, PrivateKey llavePrivada) throws Exception {
         this.cliente = cliente;
         this.llavePrivada = llavePrivada;
+        cargarLlavePublica(); // NUEVO
+    }
+
+    private void cargarLlavePublica() throws Exception {
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream("keys/public.key"))) {
+            this.llavePublicaServidor = (PublicKey) ois.readObject();
+        }
     }
 
     @Override
@@ -38,15 +50,35 @@ public class DelegadoServidor implements Runnable {
             entrada = new ObjectInputStream(cliente.getInputStream());
             salida = new ObjectOutputStream(cliente.getOutputStream());
 
-            // 1. Intercambio Diffie-Hellman
-            KeyPair parLlaves = DiffieHellman.crearLlavesDH();
-            KeyAgreement acuerdo = DiffieHellman.acuerdoLlaves(parLlaves.getPrivate());
+            // 1. Generar parámetros DH
+            AlgorithmParameterGenerator paramGen = AlgorithmParameterGenerator.getInstance("DH");
+            paramGen.init(1024);
+            AlgorithmParameters params = paramGen.generateParameters();
+            DHParameterSpec dhSpec = params.getParameterSpec(DHParameterSpec.class);
 
+            // 2. Crear par de llaves usando esos parámetros
+            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH");
+            keyGen.initialize(dhSpec);
+            KeyPair parLlaves = keyGen.generateKeyPair();
+
+            // 3. Inicializar KeyAgreement
+            KeyAgreement acuerdo = KeyAgreement.getInstance("DH");
+            acuerdo.init(parLlaves.getPrivate());
+
+            // 4. Enviar p y g al cliente
+            salida.writeObject(dhSpec.getP());
+            salida.writeObject(dhSpec.getG());
+            salida.flush();
+
+            // 5. Enviar llave pública del servidor
             salida.writeObject(parLlaves.getPublic().getEncoded());
             salida.flush();
 
+            // 6. Recibir llave pública del cliente
             byte[] llavePublicaClienteBytes = (byte[]) entrada.readObject();
             PublicKey llavePublicaCliente = DiffieHellman.reconstruirLlavePublica(llavePublicaClienteBytes);
+
+            // 7. Generar secreto compartido
             byte[] secretoCompartido = DiffieHellman.crearSecretoCompartido(acuerdo, llavePublicaCliente);
 
             MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
@@ -60,10 +92,8 @@ public class DelegadoServidor implements Runnable {
             SecretKey llaveCifrado = Cifrado.crearLlaveAES(llaveCifradoBytes);
             SecretKey llaveHMAC = Cifrado.crearLlaveHMAC(llaveHMACBytes);
 
-            // 2. Enviar tabla de servicios cifrada y firmada
+            // 8. Continuar normal: enviar tabla, recibir solicitud
             enviarTablaServicios(llaveCifrado, llaveHMAC);
-
-            // 3. Recibir solicitud de servicio
             recibirYResponderSolicitud(llaveCifrado, llaveHMAC);
 
             cliente.close();
@@ -80,14 +110,28 @@ public class DelegadoServidor implements Runnable {
         }
         byte[] datosTabla = sb.toString().getBytes();
 
+        // Medir tiempo de firmar
         medidorFirmar.comenzar();
         byte[] firma = Cifrado.firmarDatos(datosTabla, llavePrivada);
         medidorFirmar.parar();
+        System.out.println("[Tiempo] Firma de tabla: " + medidorFirmar.tiempoMilisegundos() + " ms");
 
+        // Medir tiempo de cifrar (simétrico AES)
         medidorCifrar.comenzar();
         IvParameterSpec iv = Cifrado.generarIV();
         byte[] tablaCifrada = Cifrado.cifrarAES(datosTabla, llaveCifrado, iv);
         medidorCifrar.parar();
+        System.out.println("[Tiempo] Cifrado simétrico (AES) de tabla: " + medidorCifrar.tiempoMilisegundos() + " ms");
+
+        // Medir tiempo de cifrar (asimétrico RSA)
+        Cipher cifradorRSA = Cipher.getInstance("RSA");
+        cifradorRSA.init(Cipher.ENCRYPT_MODE, llavePublicaServidor);
+
+        MedidorTiempo medidorCifrarAsimetrico = new MedidorTiempo();
+        medidorCifrarAsimetrico.comenzar();
+        byte[] tablaCifradaRSA = cifradorRSA.doFinal(datosTabla);
+        medidorCifrarAsimetrico.parar();
+        System.out.println("[Tiempo] Cifrado asimétrico (RSA) de tabla: " + medidorCifrarAsimetrico.tiempoMilisegundos() + " ms");
 
         byte[] hmac = Cifrado.HMAC(tablaCifrada, llaveHMAC);
 
@@ -99,15 +143,16 @@ public class DelegadoServidor implements Runnable {
     }
 
     private void recibirYResponderSolicitud(SecretKey llaveCifrado, SecretKey llaveHMAC) throws Exception {
-    
         byte[] ivBytes = (byte[]) entrada.readObject();
         byte[] solicitudCifrada = (byte[]) entrada.readObject();
         byte[] hmacRecibido = (byte[]) entrada.readObject();
 
+        // Medir tiempo de verificación
         medidorVerificar.comenzar();
         byte[] hmacCalculado = Cifrado.HMAC(solicitudCifrada, llaveHMAC);
         boolean hmacValido = MessageDigest.isEqual(hmacRecibido, hmacCalculado);
         medidorVerificar.parar();
+        System.out.println("[Tiempo] Verificación de HMAC solicitud: " + medidorVerificar.tiempoMilisegundos() + " ms");
 
         if (!hmacValido) {
             System.out.println("Error en la consulta (HMAC inválido). Terminando conexión.");
@@ -115,18 +160,14 @@ public class DelegadoServidor implements Runnable {
             return;
         }
 
-
-        // Descifrar solicitud
         IvParameterSpec iv = new IvParameterSpec(ivBytes);
         byte[] solicitudDescifrada = Cifrado.descifrarAES(solicitudCifrada, llaveCifrado, iv);
         String solicitudStr = new String(solicitudDescifrada);
         int idServicio = Integer.parseInt(solicitudStr.trim());
 
-        // Buscar dirección
         Map<Integer, String> direcciones = Servidor.obtenerDirecciones();
         String direccion = direcciones.getOrDefault(idServicio, "-1:-1");
 
-        // Enviar dirección cifrada con HMAC
         byte[] direccionBytes = direccion.getBytes();
 
         IvParameterSpec ivRespuesta = Cifrado.generarIV();

@@ -9,9 +9,9 @@ import java.io.*;
 import java.math.BigInteger;
 import java.net.Socket;
 import java.security.*;
-import java.security.spec.X509EncodedKeySpec;
 import java.util.Scanner;
 import javax.crypto.KeyAgreement;
+import javax.crypto.spec.DHParameterSpec;
 import java.security.MessageDigest;
 
 public class Cliente {
@@ -42,16 +42,29 @@ public class Cliente {
         salida = new ObjectOutputStream(socket.getOutputStream());
         entrada = new ObjectInputStream(socket.getInputStream());
 
-        // 1. Intercambio Diffie-Hellman
-        KeyPair parLlaves = DiffieHellman.crearLlavesDH();
-        KeyAgreement acuerdo = DiffieHellman.acuerdoLlaves(parLlaves.getPrivate());
+        // 1. Recibir p y g
+        BigInteger p = (BigInteger) entrada.readObject();
+        BigInteger g = (BigInteger) entrada.readObject();
+        DHParameterSpec dhSpec = new DHParameterSpec(p, g);
 
+        // 2. Crear par de llaves usando p y g
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH");
+        keyGen.initialize(dhSpec);
+        KeyPair parLlaves = keyGen.generateKeyPair();
+
+        // 3. Inicializar KeyAgreement
+        KeyAgreement acuerdo = KeyAgreement.getInstance("DH");
+        acuerdo.init(parLlaves.getPrivate());
+
+        // 4. Recibir llave pública del servidor
         byte[] llavePublicaServidorBytes = (byte[]) entrada.readObject();
         PublicKey llavePublicaServidorDH = DiffieHellman.reconstruirLlavePublica(llavePublicaServidorBytes);
 
+        // 5. Enviar llave pública del cliente
         salida.writeObject(parLlaves.getPublic().getEncoded());
         salida.flush();
 
+        // 6. Generar secreto compartido
         byte[] secretoCompartido = DiffieHellman.crearSecretoCompartido(acuerdo, llavePublicaServidorDH);
 
         MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
@@ -66,7 +79,6 @@ public class Cliente {
         llaveHMAC = Cifrado.crearLlaveHMAC(llaveHMACBytes);
 
         recibirTablaServicios();
-
         enviarSolicitudServicio();
 
         socket.close();
@@ -78,25 +90,21 @@ public class Cliente {
         byte[] firma = (byte[]) entrada.readObject();
         byte[] hmacRecibido = (byte[]) entrada.readObject();
 
-        // Verificar HMAC
         byte[] hmacCalculado = Cifrado.HMAC(tablaCifrada, llaveHMAC);
         if (!MessageDigest.isEqual(hmacRecibido, hmacCalculado)) {
             System.out.println("Error en la consulta (HMAC inválido). Terminando.");
             System.exit(1);
         }
 
-        // Descifrar tabla
         IvParameterSpec iv = new IvParameterSpec(ivBytes);
         byte[] datosDescifrados = Cifrado.descifrarAES(tablaCifrada, llaveCifrado, iv);
 
-        // Verificar firma
         boolean firmaValida = Cifrado.verificarFirma(datosDescifrados, firma, llavePublicaServidor);
         if (!firmaValida) {
             System.out.println("Error: firma de la tabla inválida. Terminando.");
             System.exit(1);
         }
 
-        // Mostrar tabla
         String tabla = new String(datosDescifrados);
         System.out.println("Servicios disponibles:");
         System.out.println(tabla);
@@ -107,12 +115,10 @@ public class Cliente {
         System.out.print("Ingrese el ID del servicio que desea consultar: ");
         String idServicio = scanner.nextLine();
 
-        // Cifrar solicitud
         byte[] datos = idServicio.getBytes();
         IvParameterSpec iv = Cifrado.generarIV();
         byte[] solicitudCifrada = Cifrado.cifrarAES(datos, llaveCifrado, iv);
 
-        // HMAC
         byte[] hmacSolicitud = Cifrado.HMAC(solicitudCifrada, llaveHMAC);
 
         salida.writeObject(iv.getIV());
@@ -120,7 +126,6 @@ public class Cliente {
         salida.writeObject(hmacSolicitud);
         salida.flush();
 
-        // Recibir respuesta
         recibirDireccion();
     }
 
@@ -129,14 +134,12 @@ public class Cliente {
         byte[] direccionCifrada = (byte[]) entrada.readObject();
         byte[] hmacRecibido = (byte[]) entrada.readObject();
 
-        // Verificar HMAC
         byte[] hmacCalculado = Cifrado.HMAC(direccionCifrada, llaveHMAC);
         if (!MessageDigest.isEqual(hmacRecibido, hmacCalculado)) {
             System.out.println("Error en la respuesta (HMAC inválido). Terminando.");
             System.exit(1);
         }
 
-        // Descifrar dirección
         IvParameterSpec iv = new IvParameterSpec(ivBytes);
         byte[] direccionBytes = Cifrado.descifrarAES(direccionCifrada, llaveCifrado, iv);
 
